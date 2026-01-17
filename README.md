@@ -1,8 +1,29 @@
-# Exa MCP Server 🔍
+# Exa MCP Server (Licensed Fork) 🔍
 [![Install in Cursor](https://img.shields.io/badge/Install_in-Cursor-000000?style=flat-square&logoColor=white)](https://cursor.com/en/install-mcp?name=exa&config=eyJuYW1lIjoiZXhhIiwidHlwZSI6Imh0dHAiLCJ1cmwiOiJodHRwczovL21jcC5leGEuYWkvbWNwIn0=)
 [![Install in VS Code](https://img.shields.io/badge/Install_in-VS_Code-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=exa&config=%7B%22type%22%3A%22http%22%2C%22url%22%3A%22https%3A%2F%2Fmcp.exa.ai%2Fmcp%22%7D)
-[![npm version](https://badge.fury.io/js/exa-mcp-server.svg)](https://www.npmjs.com/package/exa-mcp-server)
+[![npm version](https://badge.fury.io/js/exa-mcp-server-licensed.svg)](https://www.npmjs.com/package/exa-mcp-server-licensed)
 [![smithery badge](https://smithery.ai/badge/exa)](https://smithery.ai/server/exa)
+
+## Licensed Fork
+
+This repo is a fork of `exa-labs/exa-mcp-server` with Copyright.sh licensing:
+- automatic `ai-license` discovery
+- optional x402-aware fetch (402 + `payment-required: x402`)
+- usage logging to the Copyright.sh ledger for compensation/audit
+
+The hosted Exa MCP (`https://mcp.exa.ai/mcp`) does **not** include these licensing features. Use this fork locally if you need compliant licensing.
+
+### Licensing env vars
+
+- `COPYRIGHTSH_LEDGER_API` (default: `https://ledger.copyright.sh`)
+- `COPYRIGHTSH_LEDGER_API_KEY` (recommended for acquire + usage logging)
+- `ENABLE_LICENSE_TRACKING` (default: `true`)
+- `ENABLE_LICENSE_CACHE` (default: `false`)
+
+Note: For local usage, replace `exa-mcp-server` with `exa-mcp-server-licensed` in CLI commands.
+
+License-aware options for `web_search_exa` and `crawling_exa`:
+- `fetch`, `include_licenses`, `stage`, `distribution`, `estimated_tokens`, `max_chars`, `payment_method`
 
 ## Exa Code: fast, efficient web context for coding agents
 

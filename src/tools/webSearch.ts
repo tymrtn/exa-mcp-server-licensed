@@ -2,9 +2,12 @@ import { z } from "zod";
 import axios from "axios";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { API_CONFIG } from "./config.js";
-import { ExaSearchRequest, ExaSearchResponse } from "../types.js";
+import { ExaSearchRequest, ExaSearchResponse, LicensedFetchResult } from "../types.js";
 import { createRequestLogger } from "../utils/logger.js";
 import { checkpoint } from "agnost"
+import { getLicenseService } from "../services/license-service.js";
+import { licensedFetchText } from "../services/licensed-fetcher.js";
+import { buildUsageLicense, getLicenseOptions, logUsageFromContent } from "../services/license-utils.js";
 
 export function registerWebSearchTool(server: McpServer, config?: { exaApiKey?: string }): void {
   server.tool(
@@ -15,16 +18,33 @@ export function registerWebSearchTool(server: McpServer, config?: { exaApiKey?: 
       numResults: z.number().optional().describe("Number of search results to return (default: 8)"),
       livecrawl: z.enum(['fallback', 'preferred']).optional().describe("Live crawl mode - 'fallback': use live crawling as backup if cached content unavailable, 'preferred': prioritize live crawling (default: 'fallback')"),
       type: z.enum(['auto', 'fast', 'deep']).optional().describe("Search type - 'auto': balanced search (default), 'fast': quick results, 'deep': comprehensive search"),
-      contextMaxCharacters: z.number().optional().describe("Maximum characters for context string optimized for LLMs (default: 10000)")
+      contextMaxCharacters: z.number().optional().describe("Maximum characters for context string optimized for LLMs (default: 10000)"),
+      fetch: z.boolean().optional().describe("If true: fetch each result URL directly with x402 support and log usage from fetched content"),
+      include_licenses: z.boolean().optional().describe("Include license metadata in the response payload"),
+      stage: z.enum(["infer", "embed", "tune", "train"]).optional().describe("License stage for usage logging and x402 acquisition"),
+      distribution: z.enum(["private", "public"]).optional().describe("License distribution for usage logging and x402 acquisition"),
+      estimated_tokens: z.number().optional().describe("Token estimate used for license acquisition when a 402 paywall is encountered"),
+      max_chars: z.number().optional().describe("Max chars to return per fetched document when fetch=true"),
+      payment_method: z.enum(["account_balance", "x402"]).optional().describe("Preferred payment rail when an x402 offer is encountered")
     },
     {
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true
     },
-    async ({ query, numResults, livecrawl, type, contextMaxCharacters }) => {
+    async ({ query, numResults, livecrawl, type, contextMaxCharacters, fetch, include_licenses, stage, distribution, estimated_tokens, max_chars, payment_method }) => {
       const requestId = `web_search_exa-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
       const logger = createRequestLogger(requestId, 'web_search_exa');
+      const licenseService = getLicenseService();
+      const licenseOpts = getLicenseOptions({
+        fetch,
+        include_licenses,
+        stage,
+        distribution,
+        estimated_tokens,
+        max_chars,
+        payment_method
+      });
       
       logger.start(query);
       
@@ -78,11 +98,72 @@ export function registerWebSearchTool(server: McpServer, config?: { exaApiKey?: 
         }
 
         logger.log(`Context received with ${response.data.context.length} characters`);
-        
+
+        const results = response.data.results || [];
+        const urls = results.map((r) => r.url).filter(Boolean);
+        const licenses = await licenseService.checkLicenseBatch(urls);
+        const fetchedByUrl: Record<string, LicensedFetchResult> = {};
+
+        if (licenseOpts.fetch) {
+          for (const url of urls) {
+            const fetched = await licensedFetchText(url, {
+              ledger: licenseService,
+              stage: licenseOpts.stage,
+              distribution: licenseOpts.distribution,
+              estimatedTokens: licenseOpts.estimatedTokens,
+              maxChars: licenseOpts.maxChars,
+              paymentMethod: licenseOpts.paymentMethod
+            });
+            fetchedByUrl[url] = fetched;
+
+            if (fetched.content_text && fetched.status >= 200 && fetched.status < 300) {
+              const usageLicense = buildUsageLicense(url, licenses.get(url), fetched);
+              await logUsageFromContent(licenseService, url, fetched.content_text, usageLicense, licenseOpts.stage, licenseOpts.distribution);
+            }
+          }
+        } else {
+          for (const resultItem of results) {
+            const license = licenses.get(resultItem.url);
+            if (license) {
+              await logUsageFromContent(
+                licenseService,
+                resultItem.url,
+                resultItem.text || "",
+                license,
+                licenseOpts.stage,
+                licenseOpts.distribution
+              );
+            }
+          }
+        }
+
+        let payloadText = response.data.context;
+
+        if (licenseOpts.includeLicenses || licenseOpts.fetch) {
+          const licenseDetails = results.map((r) => {
+            const fetched = fetchedByUrl[r.url];
+            const content = fetched?.content_text || r.text || "";
+            return {
+              url: r.url,
+              title: r.title,
+              tokens: licenseService.estimateTokens(content),
+              license: licenses.get(r.url),
+              fetched: licenseOpts.fetch ? fetched : undefined
+            };
+          });
+
+          payloadText = JSON.stringify({
+            context: response.data.context,
+            results,
+            licenses: licenseDetails,
+            usage_log: licenseService.getSessionSummary()
+          }, null, 2);
+        }
+
         const result = {
           content: [{
             type: "text" as const,
-            text: response.data.context
+            text: payloadText
           }]
         };
         
