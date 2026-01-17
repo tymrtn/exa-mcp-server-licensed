@@ -40,6 +40,18 @@ export function buildUsageLicense(
   return license;
 }
 
+export function getUnavailableReason(
+  license?: LicenseInfo,
+  fetched?: LicensedFetchResult
+): string | null {
+  if (license?.action === "deny") return "license denied";
+  if (fetched?.status === 401 || fetched?.status === 403) {
+    return `blocked (${fetched.status})`;
+  }
+  if (fetched?.status === 402) return "payment required";
+  return null;
+}
+
 export async function logUsageFromContent(
   licenseService: LicenseService,
   url: string,
@@ -48,7 +60,7 @@ export async function logUsageFromContent(
   stage: LicenseStage,
   distribution: Distribution
 ): Promise<void> {
-  if (!license) return;
+  if (!license || license.action === "deny") return;
   const tokens = licenseService.estimateTokens(content);
   if (tokens === 0) return;
   await licenseService.logUsage(url, tokens, license, stage, distribution);

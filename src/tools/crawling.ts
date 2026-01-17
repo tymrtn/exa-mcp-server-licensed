@@ -6,7 +6,7 @@ import { createRequestLogger } from "../utils/logger.js";
 import { checkpoint } from "agnost";
 import { getLicenseService } from "../services/license-service.js";
 import { licensedFetchText } from "../services/licensed-fetcher.js";
-import { buildUsageLicense, getLicenseOptions, logUsageFromContent } from "../services/license-utils.js";
+import { buildUsageLicense, getLicenseOptions, getUnavailableReason, logUsageFromContent } from "../services/license-utils.js";
 import type { LicensedFetchResult } from "../types.js";
 
 export function registerCrawlingTool(server: McpServer, config?: { exaApiKey?: string }): void {
@@ -92,10 +92,16 @@ export function registerCrawlingTool(server: McpServer, config?: { exaApiKey?: s
         const urls = results.map((r: any) => r.url).filter(Boolean);
         const licenses = await licenseService.checkLicenseBatch(urls);
         const fetchedByUrl: Record<string, LicensedFetchResult> = {};
+        const blockedByUrl = new Map<string, string>();
 
         if (licenseOpts.fetch) {
           for (const resultItem of results) {
             const targetUrl = resultItem.url || url;
+            const preBlock = getUnavailableReason(licenses.get(targetUrl));
+            if (preBlock) {
+              blockedByUrl.set(targetUrl, preBlock);
+              continue;
+            }
             const fetched = await licensedFetchText(targetUrl, {
               ledger: licenseService,
               stage: licenseOpts.stage,
@@ -106,7 +112,11 @@ export function registerCrawlingTool(server: McpServer, config?: { exaApiKey?: s
             });
             fetchedByUrl[targetUrl] = fetched;
 
-            if (fetched.content_text && fetched.status >= 200 && fetched.status < 300) {
+            const blocked = getUnavailableReason(licenses.get(targetUrl), fetched);
+            if (blocked) {
+              blockedByUrl.set(targetUrl, blocked);
+              fetched.content_text = undefined;
+            } else if (fetched.content_text && fetched.status >= 200 && fetched.status < 300) {
               const usageLicense = buildUsageLicense(targetUrl, licenses.get(targetUrl), fetched);
               await logUsageFromContent(licenseService, targetUrl, fetched.content_text, usageLicense, licenseOpts.stage, licenseOpts.distribution);
             }
@@ -115,6 +125,11 @@ export function registerCrawlingTool(server: McpServer, config?: { exaApiKey?: s
           for (const resultItem of results) {
             const targetUrl = resultItem.url || url;
             const license = licenses.get(targetUrl);
+            const blocked = getUnavailableReason(license);
+            if (blocked) {
+              blockedByUrl.set(targetUrl, blocked);
+              continue;
+            }
             if (license) {
               await logUsageFromContent(
                 licenseService,
@@ -128,16 +143,26 @@ export function registerCrawlingTool(server: McpServer, config?: { exaApiKey?: s
           }
         }
 
+        const hasBlocked = blockedByUrl.size > 0;
         let payload = response.data as any;
-        if (licenseOpts.includeLicenses || licenseOpts.fetch) {
+        if (licenseOpts.includeLicenses || licenseOpts.fetch || hasBlocked) {
+          const sanitizedResults = results.map((r: any) => {
+            const targetUrl = r.url || url;
+            const blocked = blockedByUrl.get(targetUrl);
+            if (!blocked) return r;
+            return { ...r, text: "" };
+          });
           payload = {
             ...response.data,
+            results: sanitizedResults,
             licenses: results.map((r: any) => {
               const targetUrl = r.url || url;
               const fetched = fetchedByUrl[targetUrl];
-              const content = fetched?.content_text || r.text || "";
+              const blocked = blockedByUrl.get(targetUrl);
+              const content = blocked ? "" : (fetched?.content_text || r.text || "");
               return {
                 url: targetUrl,
+                unavailable: blocked || undefined,
                 tokens: licenseService.estimateTokens(content),
                 license: licenses.get(targetUrl),
                 fetched: licenseOpts.fetch ? fetched : undefined

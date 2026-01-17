@@ -7,7 +7,7 @@ import { createRequestLogger } from "../utils/logger.js";
 import { checkpoint } from "agnost"
 import { getLicenseService } from "../services/license-service.js";
 import { licensedFetchText } from "../services/licensed-fetcher.js";
-import { buildUsageLicense, getLicenseOptions, logUsageFromContent } from "../services/license-utils.js";
+import { buildUsageLicense, getLicenseOptions, getUnavailableReason, logUsageFromContent } from "../services/license-utils.js";
 
 export function registerWebSearchTool(server: McpServer, config?: { exaApiKey?: string }): void {
   server.tool(
@@ -103,9 +103,16 @@ export function registerWebSearchTool(server: McpServer, config?: { exaApiKey?: 
         const urls = results.map((r) => r.url).filter(Boolean);
         const licenses = await licenseService.checkLicenseBatch(urls);
         const fetchedByUrl: Record<string, LicensedFetchResult> = {};
+        const blockedByUrl = new Map<string, string>();
 
         if (licenseOpts.fetch) {
           for (const url of urls) {
+            const existingLicense = licenses.get(url);
+            const preBlock = getUnavailableReason(existingLicense);
+            if (preBlock) {
+              blockedByUrl.set(url, preBlock);
+              continue;
+            }
             const fetched = await licensedFetchText(url, {
               ledger: licenseService,
               stage: licenseOpts.stage,
@@ -116,7 +123,11 @@ export function registerWebSearchTool(server: McpServer, config?: { exaApiKey?: 
             });
             fetchedByUrl[url] = fetched;
 
-            if (fetched.content_text && fetched.status >= 200 && fetched.status < 300) {
+            const blocked = getUnavailableReason(licenses.get(url), fetched);
+            if (blocked) {
+              blockedByUrl.set(url, blocked);
+              fetched.content_text = undefined;
+            } else if (fetched.content_text && fetched.status >= 200 && fetched.status < 300) {
               const usageLicense = buildUsageLicense(url, licenses.get(url), fetched);
               await logUsageFromContent(licenseService, url, fetched.content_text, usageLicense, licenseOpts.stage, licenseOpts.distribution);
             }
@@ -124,6 +135,11 @@ export function registerWebSearchTool(server: McpServer, config?: { exaApiKey?: 
         } else {
           for (const resultItem of results) {
             const license = licenses.get(resultItem.url);
+            const blocked = getUnavailableReason(license);
+            if (blocked) {
+              blockedByUrl.set(resultItem.url, blocked);
+              continue;
+            }
             if (license) {
               await logUsageFromContent(
                 licenseService,
@@ -137,15 +153,23 @@ export function registerWebSearchTool(server: McpServer, config?: { exaApiKey?: 
           }
         }
 
+        const hasBlocked = blockedByUrl.size > 0;
         let payloadText = response.data.context;
 
-        if (licenseOpts.includeLicenses || licenseOpts.fetch) {
+        if (licenseOpts.includeLicenses || licenseOpts.fetch || hasBlocked) {
+          const sanitizedResults = results.map((r) => {
+            const blocked = blockedByUrl.get(r.url);
+            if (!blocked) return r;
+            return { ...r, text: "" };
+          });
           const licenseDetails = results.map((r) => {
             const fetched = fetchedByUrl[r.url];
-            const content = fetched?.content_text || r.text || "";
+            const blocked = blockedByUrl.get(r.url);
+            const content = blocked ? "" : (fetched?.content_text || r.text || "");
             return {
               url: r.url,
               title: r.title,
+              unavailable: blocked || undefined,
               tokens: licenseService.estimateTokens(content),
               license: licenses.get(r.url),
               fetched: licenseOpts.fetch ? fetched : undefined
@@ -153,8 +177,8 @@ export function registerWebSearchTool(server: McpServer, config?: { exaApiKey?: 
           });
 
           payloadText = JSON.stringify({
-            context: response.data.context,
-            results,
+            context: hasBlocked ? undefined : response.data.context,
+            results: sanitizedResults,
             licenses: licenseDetails,
             usage_log: licenseService.getSessionSummary()
           }, null, 2);
