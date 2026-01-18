@@ -25,6 +25,10 @@ Note: For local usage, replace `exa-mcp-server` with `exa-mcp-server-licensed` i
 License-aware options for `web_search_exa` and `crawling_exa`:
 - `fetch`, `include_licenses`, `stage`, `distribution`, `estimated_tokens`, `max_chars`, `payment_method`
 
+Unavailable policy:
+- License denied or HTTP 401/403/402 results are returned as unavailable
+- Unknown license remains best-effort
+
 ## Exa Code: fast, efficient web context for coding agents
 
 Vibe coding should never have a bad vibe. `exa-code` is a huge step towards coding agents that never hallucinate.
